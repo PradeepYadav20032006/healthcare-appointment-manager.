@@ -1,0 +1,178 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  DOCTOR
+  PATIENT
+}
+
+enum AppointmentStatus {
+  BOOKED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum Urgency {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum NotificationType {
+  BOOKING_CONFIRMATION
+  REMINDER
+  CANCELLATION
+  LEAVE_CONFLICT
+  MEDICATION_REMINDER
+  RESCHEDULE
+}
+
+model User {
+  id                  String         @id @default(uuid())
+  email               String         @unique
+  passwordHash        String
+  name                String
+  role                Role
+  phone               String?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  doctorProfile       DoctorProfile?
+  patientAppointments Appointment[]  @relation("PatientAppointments")
+  googleToken         GoogleToken?
+}
+
+model DoctorProfile {
+  id                   String        @id @default(uuid())
+  userId               String        @unique
+  user                 User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  specialisation       String
+  slotDurationMinutes  Int           @default(30)
+  // workingHours JSON shape: { "mon": [{"start":"09:00","end":"13:00"}], "tue": [...], ... }
+  workingHours         Json
+  bio                  String?
+  createdAt            DateTime      @default(now())
+
+  appointments         Appointment[] @relation("DoctorAppointments")
+  leaveDays            LeaveDay[]
+
+  @@index([specialisation])
+}
+
+model LeaveDay {
+  id        String        @id @default(uuid())
+  doctorId  String
+  doctor    DoctorProfile @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  date      DateTime // stored as UTC midnight for the given date
+  reason    String?
+  createdAt DateTime      @default(now())
+
+  @@unique([doctorId, date])
+}
+
+// Short-lived hold created while a patient is filling the symptom form,
+// so two patients cannot simultaneously finish booking the same slot.
+model SlotHold {
+  id        String   @id @default(uuid())
+  doctorId  String
+  slotStart DateTime
+  patientId String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@unique([doctorId, slotStart])
+}
+
+model Appointment {
+  id                   String              @id @default(uuid())
+  patientId            String
+  patient              User                @relation("PatientAppointments", fields: [patientId], references: [id])
+  doctorId             String
+  doctor               DoctorProfile       @relation("DoctorAppointments", fields: [doctorId], references: [id])
+
+  slotStart            DateTime
+  slotEnd              DateTime
+  status               AppointmentStatus   @default(BOOKED)
+
+  // Set to `${doctorId}|${slotStart.toISOString()}` while status = BOOKED,
+  // and set to NULL on cancel/reschedule. A unique index on this column
+  // is what actually prevents double-booking at the DB level (see
+  // SYSTEM_DESIGN.md). Postgres/SQLite both allow multiple NULLs in a
+  // unique index, so cancelled slots free up automatically.
+  activeSlotKey        String?             @unique
+
+  symptoms             String?
+  preVisitSummary      Json?
+  urgency              Urgency?
+
+  doctorNotes          String?
+  prescription         Json?               // [{ name, dosage, frequencyPerDay, durationDays, times: ["09:00","21:00"] }]
+  postVisitSummary     String?
+
+  googleEventIdPatient String?
+  googleEventIdDoctor  String?
+  reminderSentAt       DateTime?
+
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  notifications        Notification[]
+  medicationReminders  MedicationReminder[]
+
+  @@index([doctorId, slotStart])
+  @@index([patientId])
+}
+
+model Notification {
+  id             String              @id @default(uuid())
+  appointmentId  String?
+  appointment    Appointment?        @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  recipientEmail String
+  type           NotificationType
+  subject        String
+  body           String
+  status         NotificationStatus  @default(PENDING)
+  attempts       Int                 @default(0)
+  lastError      String?
+  createdAt      DateTime            @default(now())
+  sentAt         DateTime?
+
+  @@index([status])
+}
+
+model MedicationReminder {
+  id             String      @id @default(uuid())
+  appointmentId  String
+  appointment    Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  medicationName String
+  dosage         String?
+  scheduleTimes  Json        // e.g. ["09:00","21:00"]
+  startDate      DateTime
+  endDate        DateTime
+  lastSentDate   DateTime?
+  active         Boolean     @default(true)
+}
+
+model GoogleToken {
+  id           String   @id @default(uuid())
+  userId       String   @unique
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken  String
+  refreshToken String?
+  expiryDate   BigInt?
+  updatedAt    DateTime @updatedAt
+}
